@@ -1,0 +1,174 @@
+<style>
+#cd svg { width: 100%; }
+#cd svg .classGroup rect { rx: 8; }
+#cd svg .divider path { stroke-opacity: 0.5; }
+</style>
+<div id="cd" style="padding: 1rem 0"></div>
+<script type="module">
+import mermaid from 'https://esm.sh/mermaid@11/dist/mermaid.esm.min.mjs';
+const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+await document.fonts.ready;
+mermaid.initialize({
+  startOnLoad: false,
+  theme: 'base',
+  fontFamily: '"Anthropic Sans", sans-serif',
+  themeVariables: {
+    darkMode: dark,
+    fontSize: '13px',
+    fontFamily: '"Anthropic Sans", sans-serif',
+    lineColor: dark ? '#9c9a92' : '#73726c',
+    textColor: dark ? '#c2c0b6' : '#3d3d3a',
+  },
+});
+const { svg } = await mermaid.render('cd-svg', `classDiagram
+  namespace SharedModels {
+    class Podcast {
+      +string CreatorId
+      +string HomeServerUrl
+      +string Title
+      +string Description
+      +string CoverImageUrl
+      +string Author
+      +string Language
+      +DateTime CreatedAt
+      +DateTime UpdatedAt
+      +List~Episode~ Episodes
+    }
+    class Episode {
+      +string EpisodeId
+      +string CreatorId
+      +string Title
+      +string Description
+      +string CoverImageUrl
+      +DateTime PublishedAt
+      +TimeSpan Duration
+      +int Season
+      +int EpisodeNumber
+      +List~string~ Tags
+      +string AudioUrl
+      +string AudioFormat
+      +long FileSizeBytes
+      +string AudioChecksum
+      +DateTime UpdatedAt
+      +DateTime DeletedAt
+    }
+  }
+
+  namespace DistributionServer {
+    class CachedEpisode {
+      +bool IsLocallyCached
+      +DateTime CachedAt
+      +DateTime LastAccessedAt
+    }
+    class FederatedServer {
+      +Guid Id
+      +string BaseUrl
+      +DateTime LastSeen
+      +bool IsActive
+      +string HmacSecret
+    }
+    class ClusterNode {
+      +Guid NodeId
+      +string CreatorId
+      +NodeRole Role
+      +DateTime LastHeartbeat
+      +int SyncedFilesCount
+      +bool IsReachable
+    }
+    class User {
+      +Guid Id
+      +string Email
+      +string PasswordHash
+      +string ExternalProvider
+      +string ExternalProviderId
+      +DateTime RegisteredAt
+    }
+    class Playlist {
+      +Guid Id
+      +Guid UserId
+      +string PodcastId
+      +string Title
+      +DateTime CreatedAt
+      +List~PlaylistItem~ Items
+    }
+    class PlaylistItem {
+      +Guid Id
+      +Guid PlaylistId
+      +string EpisodeId
+      +int Order
+    }
+    class Favorite {
+      +Guid Id
+      +Guid UserId
+      +string EpisodeId
+      +string PodcastId
+      +DateTime SavedAt
+    }
+    class ListeningHistory {
+      +Guid Id
+      +Guid UserId
+      +string EpisodeId
+      +int PositionSeconds
+      +DateTime LastListenedAt
+    }
+    class Subscription {
+      +Guid Id
+      +Guid UserId
+      +string CreatorId
+      +DateTime SubscribedAt
+    }
+    class PlayEvent {
+      +Guid Id
+      +string EpisodeId
+      +string CreatorId
+      +DateTime Date
+      +bool IsRegisteredUser
+      +Guid UserId
+    }
+    class NodeRole {
+      <<enumeration>>
+      Primary
+      Secondary
+    }
+  }
+
+  namespace CreatorAgent {
+    class CreatorConfig {
+      +int ListenPort
+      +string PodcastsDirectory
+      +HomeServerConfig HomeServer
+      +string CreatorId
+      +int MaxConcurrentStreams
+      +int HeartbeatIntervalSeconds
+      +int SyncIntervalMinutes
+    }
+    class HomeServerConfig {
+      +string Url
+      +string Token
+    }
+    class Ed25519Identity {
+      +byte[] PublicKey
+      +byte[] PrivateKey
+      +string CreatorId
+      +Sign(byte[] data) byte[]
+      +Verify(byte[] data, byte[] sig) bool
+    }
+  }
+
+  Episode --|> CachedEpisode : estende
+  Podcast "1" --> "many" Episode : contiene
+  CachedEpisode --> FederatedServer : scaricato da
+  ClusterNode --> NodeRole : ha ruolo
+  User "1" --> "many" Playlist : crea
+  User "1" --> "many" Favorite : salva
+  User "1" --> "many" ListeningHistory : ha
+  User "1" --> "many" Subscription : ha
+  Playlist "1" --> "many" PlaylistItem : contiene
+  PlaylistItem --> Episode : riferisce
+  ListeningHistory --> Episode : riferisce
+  PlayEvent --> Episode : traccia
+  CreatorConfig --> HomeServerConfig : ha
+  CreatorConfig --> Ed25519Identity : usa
+`);
+document.getElementById('cd').innerHTML = svg;
+</script>

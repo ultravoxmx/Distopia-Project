@@ -1,0 +1,158 @@
+<style>
+#erd svg { width: 100%; }
+#erd svg.erDiagram .divider path { stroke-opacity: 0.5; }
+#erd svg.erDiagram .row-rect-odd path,
+#erd svg.erDiagram .row-rect-odd rect,
+#erd svg.erDiagram .row-rect-even path,
+#erd svg.erDiagram .row-rect-even rect { stroke: none !important; }
+</style>
+<div id="erd" style="padding: 1rem 0"></div>
+<script type="module">
+import mermaid from 'https://esm.sh/mermaid@11/dist/mermaid.esm.min.mjs';
+const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+await document.fonts.ready;
+mermaid.initialize({
+  startOnLoad: false,
+  theme: 'base',
+  fontFamily: '"Anthropic Sans", sans-serif',
+  themeVariables: {
+    darkMode: dark,
+    fontSize: '13px',
+    fontFamily: '"Anthropic Sans", sans-serif',
+    lineColor: dark ? '#9c9a92' : '#73726c',
+    textColor: dark ? '#c2c0b6' : '#3d3d3a',
+  },
+});
+const { svg } = await mermaid.render('erd-svg', `erDiagram
+  Podcast {
+    string CreatorId PK
+    string HomeServerUrl
+    string Title
+    string Description
+    string CoverImageUrl
+    string Author
+    string Language
+    datetime CreatedAt
+    datetime UpdatedAt
+  }
+  Episode {
+    string EpisodeId PK
+    string CreatorId FK
+    string Title
+    string Description
+    string CoverImageUrl
+    datetime PublishedAt
+    int DurationSeconds
+    int Season
+    int EpisodeNumber
+    string AudioUrl
+    string AudioFormat
+    long FileSizeBytes
+    string AudioChecksum
+    bool IsLocallyCached
+    datetime CachedAt
+    datetime LastAccessedAt
+    datetime DeletedAt
+    datetime UpdatedAt
+  }
+  FederatedServer {
+    uuid Id PK
+    string BaseUrl
+    datetime LastSeen
+    bool IsActive
+    string HmacSecret
+  }
+  ClusterNode {
+    uuid NodeId PK
+    string CreatorId FK
+    string Role
+    datetime LastHeartbeat
+    int SyncedFilesCount
+    bool IsReachable
+  }
+  User {
+    uuid Id PK
+    string Email
+    string PasswordHash
+    string ExternalProvider
+    string ExternalProviderId
+    datetime RegisteredAt
+  }
+  Playlist {
+    uuid Id PK
+    uuid UserId FK
+    string PodcastId FK
+    string Title
+    datetime CreatedAt
+  }
+  PlaylistItem {
+    uuid Id PK
+    uuid PlaylistId FK
+    string EpisodeId FK
+    int Order
+  }
+  Favorite {
+    uuid Id PK
+    uuid UserId FK
+    string EpisodeId
+    string PodcastId
+    datetime SavedAt
+  }
+  ListeningHistory {
+    uuid Id PK
+    uuid UserId FK
+    string EpisodeId FK
+    int PositionSeconds
+    datetime LastListenedAt
+  }
+  Subscription {
+    uuid Id PK
+    uuid UserId FK
+    string CreatorId FK
+    datetime SubscribedAt
+  }
+  PlayEvent {
+    uuid Id PK
+    string EpisodeId FK
+    string CreatorId FK
+    datetime Date
+    bool IsRegisteredUser
+    uuid UserId
+  }
+  Podcast ||--o{ Episode : "contiene"
+  Podcast ||--o{ ClusterNode : "gestito da"
+  Podcast ||--o{ Subscription : "seguita da"
+  Podcast ||--o{ PlayEvent : "genera"
+  Episode ||--o{ PlaylistItem : "incluso in"
+  Episode ||--o{ ListeningHistory : "ascoltato in"
+  Episode ||--o{ PlayEvent : "genera"
+  User ||--o{ Playlist : "crea"
+  User ||--o{ Favorite : "salva"
+  User ||--o{ ListeningHistory : "ha"
+  User ||--o{ Subscription : "ha"
+  Playlist ||--o{ PlaylistItem : "contiene"
+`);
+document.getElementById('erd').innerHTML = svg;
+document.querySelectorAll('#erd svg.erDiagram .node').forEach(node => {
+  const firstPath = node.querySelector('path[d]');
+  if (!firstPath) return;
+  const d = firstPath.getAttribute('d');
+  const nums = d.match(/-?[\d.]+/g)?.map(Number);
+  if (!nums || nums.length < 8) return;
+  const xs = [nums[0], nums[2], nums[4], nums[6]];
+  const ys = [nums[1], nums[3], nums[5], nums[7]];
+  const x = Math.min(...xs), y = Math.min(...ys);
+  const w = Math.max(...xs) - x, h = Math.max(...ys) - y;
+  const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  rect.setAttribute('x', x); rect.setAttribute('y', y);
+  rect.setAttribute('width', w); rect.setAttribute('height', h);
+  rect.setAttribute('rx', '8');
+  for (const a of ['fill', 'stroke', 'stroke-width', 'class', 'style']) {
+    if (firstPath.hasAttribute(a)) rect.setAttribute(a, firstPath.getAttribute(a));
+  }
+  firstPath.replaceWith(rect);
+});
+document.querySelectorAll('#erd svg.erDiagram .row-rect-odd path, #erd svg.erDiagram .row-rect-even path').forEach(p => {
+  p.setAttribute('stroke', 'none');
+});
+</script>
