@@ -27,12 +27,12 @@ Distopia è una piattaforma di distribuzione podcast decentralizzata basata su .
 
 ### 2.1 Componenti Principali
 
-Il sistema è composto da **due soli progetti**, non tre: il Web Frontend è integrato nel Distribution Server come parte dello stesso processo ASP.NET Core. Un unico progetto espone sia le API REST (per client programmatici e federazione) che le pagine Blazor (per gli utenti finali). Questo semplifica il deployment, il certificato TLS e la gestione della cache.
+Il sistema è composto da **due soli progetti**, non tre: il Web Frontend è integrato nel Distribution Server come parte dello stesso processo ASP.NET Core. Un unico progetto espone sia le API REST (per client programmatici e federazione) che le pagine Razor Pages (per gli utenti finali). Questo semplifica il deployment, il certificato TLS e la gestione della cache.
 
 | Componente | Tecnologia | Ruolo |
 |---|---|---|
 | Creator Agent | C# .NET 9 / Avalonia UI | App desktop sul PC del creator |
-| Distribution Server + Web UI | C# .NET 9 / ASP.NET Core + Blazor | API REST, pagine web e cache — tutto in un unico processo |
+| Distribution Server + Web UI | C# .NET 9 / ASP.NET Core + Razor Pages | API REST, pagine web e cache — tutto in un unico processo |
 
 ### 2.2 Flusso di Richiesta
 
@@ -155,7 +155,7 @@ Distopia.CreatorAgent/
 
 ## 4. Distribution Server + Web UI
 
-Il Distribution Server e il Web Frontend vivono nello stesso progetto ASP.NET Core 9. Le pagine Blazor condividono direttamente i service e la cache del server — nessuna chiamata API interna, nessun layer aggiuntivo.
+Il Distribution Server e il Web Frontend vivono nello stesso progetto ASP.NET Core 9. Le pagine Razor Pages condividono direttamente i service e la cache del server — nessuna chiamata API interna, nessun layer aggiuntivo.
 
 ### 4.1 Struttura del Progetto
 
@@ -167,14 +167,14 @@ Distopia.Server/
 │   ├── PodcastsController.cs
 │   ├── FederationController.cs
 │   └── AdminController.cs
-├── Components/                   // Blazor Server — pagine per utenti web
-│   ├── App.razor
+├── Pages/                        // Razor Pages — pagine per utenti web
+│   ├── _Layout.cshtml
 │   ├── Pages/
-│   │   ├── Home.razor            // Homepage e ricerca podcast
-│   │   ├── Creator.razor         // Pagina del creator con lista episodi
-│   │   └── Player.razor          // Player audio con streaming
-│   └── Layout/
-│       └── MainLayout.razor
+│   │   ├── Index.cshtml            // Homepage e ricerca podcast
+│   │   ├── Creator.cshtml         // Pagina del creator con lista episodi
+│   │   └── Player.cshtml          // Player audio con streaming
+│   └── Shared/
+│       └── _Layout.cshtml
 ├── Services/
 │   ├── CacheService.cs           // Cache locale (disco + memoria)
 │   ├── CreatorProxyService.cs    // Proxy verso Creator Agent
@@ -465,11 +465,9 @@ public class Episode {
 | Canale | Autenticazione | Crittografia |
 |---|---|---|
 | Utente → Server | Nessuna (pubblica) | HTTPS/TLS |
-| Server → Creator Agent | Bearer Token (JWT) | HTTPS/TLS |
+| Server → Creator Agent | Bearer Token (JWT) + firma HMAC | HTTPS/TLS |
 | Server → Server (Fed.) | HMAC-SHA256 su nonce | HTTPS/TLS |
 | Admin → Server | API Key + OAuth2 | HTTPS/TLS |
-
-> 💡 Se si usa **Cloudflare Tunnel**, i server federati non conoscono l'IP reale del creator. L'indirizzo esposto è quello del tunnel provider.
 
 ### 6.2 Firma dei Messaggi
 
@@ -477,38 +475,188 @@ Ogni richiesta tra componenti del sistema deve essere firmata, in modo che il de
 
 **Creator Agent → Home Server e Home Server → Creator Agent**
 
-Ogni richiesta HTTP include un header di firma calcolato sull'intero body e su un timestamp:
+Il Creator Agent firma **tutte** le comunicazioni con l'home server usando la propria chiave privata **Ed25519** — non solo i metadati, ma ogni singola transazione: heartbeat, richieste di file, aggiornamenti, registrazione del cluster. L'home server verifica ogni messaggio ricevuto usando la chiave pubblica del creator registrata al momento dell'installazione. Se la firma non è valida, la richiesta viene rifiutata immediatamente.
 
 ```
-X-Distopia-Signature: HMAC-SHA256(secret, timestamp + method + path + body)
-X-Distopia-Timestamp: 1718000000
+X-Distopia-Signature:   <firma Ed25519 di (timestamp + method + path + body)>
+X-Distopia-PublicKey:   <chiave pubblica Ed25519 del creator>
+X-Distopia-Timestamp:   1718000000
 ```
 
-Il ricevente ricalcola la firma e la confronta. Se non corrisponde, la richiesta viene rifiutata. Il timestamp previene i replay attack: richieste con timestamp più vecchio di 60 secondi vengono scartate.
+Il timestamp previene i replay attack — messaggi con timestamp più vecchio di 60 secondi vengono scartati. La chiave pubblica nell'header permette all'home server di verificare la firma senza consultare il DB ad ogni richiesta.
 
 **Server → Server (Federazione)**
 
 I server federati usano lo stesso meccanismo HMAC-SHA256. Ogni coppia di server condivide un segreto generato al momento del primo handshake di federazione. Il segreto viene scambiato una sola volta in modo sicuro (durante l'onboarding, vedi sezione 5.2) e poi usato per firmare tutte le comunicazioni successive.
 
-### 6.3 Considerazioni sulla Fiducia
+**Firma dei metadati e dei file audio**
 
-- Il Creator Agent accetta richieste **solo dall'home server** — un token non riconosciuto causa rifiuto immediato
-- Un server federato che presenta una firma non valida viene marcato come `IsActive = false` nel DB e non viene più contattato finché un admin non lo riabilita
-- Tutti i segreti HMAC sono ruotabili dalla UI senza downtime
+I metadati degli episodi e i checksum dei file audio sono firmati dal Creator Agent con la propria **chiave privata Ed25519** (vedi sezione 11.1). Ogni server che riceve metadati federati verifica la firma usando la chiave pubblica del creator prima di accettarli. Questo garantisce autenticità indipendentemente dal server che ha trasmesso i dati.
+
+```
+X-Distopia-Creator-Signature: <firma Ed25519 dei metadati>
+X-Distopia-Creator-PublicKey: <chiave pubblica Ed25519 del creator>
+```
+
+### 6.3 Integrità dei File Audio
+
+Il checksum SHA-256 di ogni file audio è incluso nei metadati dell'episodio e firmato insieme ad essi. Ogni server che scarica un file — sia dall'home server che da un peer federato — ricalcola il checksum e lo confronta con quello firmato dal creator. Se non corrisponde, il file viene scartato e la richiesta viene ripetuta verso un altro peer.
+
+Questo protegge da:
+- File alterati durante il transito
+- Cache poisoning da server intermedi compromessi
+- File sostituiti da un server malevolo
+
+### 6.4 Analisi dei Vettori di Attacco
+
+**Server malevolo nella federazione**
+
+| Attacco | Descrizione | Contromisura |
+|---|---|---|
+| False dichiarazioni di cache | Il server dichiara di avere file che non ha, causando richieste inutili | Timeout breve su `/federation/has/{id}` + blacklist automatica dopo N fallimenti |
+| File audio alterati | Il server restituisce file modificati al posto degli originali | Verifica checksum SHA-256 firmato dal creator su ogni file ricevuto |
+| Metadati falsificati | Il server propaga metadati con URL home server alterati | Firma RSA/Ed25519 dei metadati verificata da ogni peer |
+| DoS distribuito | Server coordinati per saturare l'home server di richieste | Rate limiting per server + blacklist automatica |
+
+Un server federato che presenta firme non valide o supera la soglia di errori viene marcato come `IsActive = false` nel DB e non viene più contattato finché un admin non lo riabilita manualmente.
+
+**Client compromesso (Creator Agent)**
+
+| Attacco | Descrizione | Contromisura |
+|---|---|---|
+| Servire file modificati | Il Creator Agent compromesso serve file audio alterati | Checksum verificato lato server — il file viene scartato se non corrisponde |
+| Raccolta informazioni | Log di tutti i server che si connettono | Logging delle connessioni SignalR visibile al creator dalla UI |
+| Token rubato | L'attaccante usa il token del creator per impersonarlo | Token revocabile dal creator in qualsiasi momento dalla UI |
+
+**Attacchi alla federazione**
+
+| Attacco | Descrizione | Contromisura |
+|---|---|---|
+| Enumerazione creator | Mappare tutti i creator e i loro home server | Endpoint federati accessibili solo a server autenticati |
+| Registrazione massiva server finti | Saturare il DB con server fantasma | Rate limiting su `/federation/announce` + modalità permissioned |
+| Replay attack SignalR | Riutilizzo di messaggi intercettati | Timestamp + nonce in ogni messaggio, finestra di 60 secondi |
+| Man-in-the-middle | Intercettazione del traffico tra componenti | TLS obbligatorio su tutti i canali, certificati verificati |
+
+**Registrazione creator malevola**
+
+| Attacco | Descrizione | Contromisura |
+|---|---|---|
+| Registrazione massiva creator finti | Saturare il DB del server | Rate limiting su `/creators/register` + CAPTCHA o verifica email |
+| Impersonazione creator | Registrarsi con il CreatorId di un creator esistente | CreatorId univoco verificato al momento della registrazione — rifiuto se già esistente |
+
+### 6.5 Considerazioni sulla Fiducia
+
+- Il Creator Agent accetta connessioni SignalR **solo dall'home server** — qualsiasi altra connessione viene rifiutata immediatamente
+- I metadati senza firma valida del creator vengono ignorati da tutti i server
+- I file senza checksum corrispondente vengono scartati e non messi in cache
+- Tutti i segreti HMAC e le chiavi sono ruotabili dalla UI senza downtime
+- Un server o creator disattivato da un admin perde immediatamente l'accesso — nessuna finestra di grazia
 
 ---
 
 ## 7. Piano di Implementazione
 
-| Fase | Componente | Attività | Priorità |
-|---|---|---|---|
-| 1 | Creator Agent | Kestrel + streaming file + feed JSON | Alta |
-| 2 | Distribution Server | Cache disco + proxy creator + API pubblica | Alta |
-| 3 | Web UI (integrata) | Blazor: ricerca, player audio, liste episodi | Alta |
-| 4 | Federazione | Sync metadati tra server + gossip protocol | Media |
-| 5 | Sicurezza | JWT, HMAC, rate limiting, audit log | Media |
-| 6 | DevOps | Docker, CI/CD, Helm chart per Kubernetes | Bassa |
-| 7 | Dashboard Creator | Statistiche ascolti, gestione accessi | Bassa |
+Il progetto viene sviluppato in **5 step progressivi**. Ogni step produce qualcosa di funzionante e utilizzabile — nessun cantiere aperto a lungo. Le funzionalità più complesse vengono aggiunte iterativamente sopra una base solida.
+
+### Step 1 — Il cuore del sistema *(4-6 settimane)*
+
+Obiettivo: un creator pubblica, un utente ascolta. Niente federazione, niente cluster, niente utenti registrati.
+
+**Creator Agent:**
+- Kestrel embedded + serving file audio con HTTP Range Requests
+- Feed JSON per podcast ed episodi
+- Generazione coppia chiavi Ed25519 + firma di tutte le transazioni
+- Connessione SignalR verso l'home server
+- FileSystemWatcher per rilevare nuovi podcast ed episodi
+- UI Avalonia minimale (stato connessione, lista podcast)
+
+**Distribution Server:**
+- Cache disco + proxy verso Creator Agent via SignalR
+- API REST pubblica per episodi e feed
+- Razor Pages: homepage, pagina creator, player audio base
+- SQLite → SQL Server con EF Core
+
+**Risultato:** sistema end-to-end funzionante con un singolo server e uno o più creator.
+
+---
+
+### Step 2 — Federazione *(3-4 settimane)*
+
+Obiettivo: più server si sincronizzano, il carico si distribuisce.
+
+- Gossip protocol + announce tra server
+- Sync metadati periodico (ogni 5 minuti)
+- Risoluzione file in ordine random tra peer (`OrderBy(_ => Guid.NewGuid())`)
+- Onboarding nuovo server con download metadati completo
+- Endpoint `/federation/has/{episodeId}` per lookup rapido
+- Modalità open / permissioned per la federazione
+- Invalidazione cache e propagazione eliminazioni tramite sync
+
+**Risultato:** rete federata funzionante, resiliente alla caduta di singoli server.
+
+---
+
+### Step 3 — Utenti Web *(3-4 settimane)*
+
+Obiettivo: piattaforma utilizzabile da utenti reali con funzionalità personalizzate.
+
+- ASP.NET Core Identity + JWT
+- Login con email/password + OAuth2 (Google, Apple)
+- Playlist (episodi dello stesso podcast, ordinabili)
+- Preferiti (episodi e podcast)
+- Storico ascolti con posizione di ripresa
+- Abbonamenti a creator + feed personale
+- Ricerca full-text su titoli e descrizioni
+
+**Risultato:** piattaforma completa per gli utenti finali.
+
+---
+
+### Step 4 — Cluster Failover *(2-3 settimane)*
+
+Obiettivo: il creator ha ridondanza geografica senza configurazione complessa.
+
+- Supporto multi-nodo per lo stesso creator (Primary/Secondary)
+- Heartbeat ogni 30 secondi verso l'home server
+- Elezione automatica coordinata dall'home server dopo 90 secondi di inattività
+- Sync periodico dei file tra nodi tramite home server (ogni 15 minuti)
+- Failback automatico quando il Primary originale torna online
+- UI Avalonia aggiornata con stato del cluster
+
+**Risultato:** alta disponibilità del Creator Agent, trasparente per gli utenti.
+
+---
+
+### Step 5 — Statistiche e Sicurezza Avanzata *(2-3 settimane)*
+
+Obiettivo: prodotto completo e hardened.
+
+**Statistiche:**
+- Tracciamento ascolti per episodio (con anonimizzazione IP)
+- Aggregazione dati dai peer federati tramite sync
+- Dashboard creator: ascolti totali, utenti unici, andamento giornaliero/mensile
+
+**Sicurezza avanzata:**
+- Rate limiting su tutti gli endpoint pubblici e federati
+- Blacklist automatica server con firme invalide
+- Audit log completo delle operazioni amministrative
+- Verifica checksum SHA-256 su tutti i file ricevuti
+- CAPTCHA / verifica email per registrazione creator in modalità automatica
+
+**Risultato:** prodotto pronto per uso pubblico.
+
+---
+
+### Stima Complessiva
+
+| Step | Contenuto | Durata stimata |
+|---|---|---|
+| 1 | Creator Agent + Distribution Server base | 4-6 settimane |
+| 2 | Federazione | 3-4 settimane |
+| 3 | Utenti web | 3-4 settimane |
+| 4 | Cluster failover | 2-3 settimane |
+| 5 | Statistiche e sicurezza | 2-3 settimane |
+| **Totale** | | **14-20 settimane** |
 
 ### Stack Tecnologico
 
@@ -653,42 +801,157 @@ Il Creator Agent viene registrato come servizio di sistema (Windows Service su W
 
 ---
 
-## 9. Statistiche
+## 9. Failover e Backup del Creator Agent
 
-### 9.1 Cosa viene tracciato
+### 9.1 Architettura Primary/Secondary
+
+Un creator può installare un numero illimitato di Creator Agent in posizioni geografiche diverse, collegati tra loro tramite l'home server. In ogni momento **un solo nodo è Primary** — l'unico autorizzato a servire i file agli utenti. Gli altri nodi sono Secondary — sincronizzano i contenuti e sono pronti a subentrare in caso di failover.
+
+L'home server funge da **coordinatore del cluster**: tutti i nodi, Primary e Secondary, aprono una connessione SignalR verso l'home server. Ogni nodo fa solo connessioni uscenti verso un indirizzo noto — nessuna porta da aprire, nessun indirizzo pubblico necessario, funziona da qualsiasi rete geografica.
+
+```
+                    [ Home Server ]
+                    /      |      \
+              SignalR  SignalR  SignalR
+                /        |        \
+     [ Primary ]  [ Secondary 1 ] [ Secondary 2 ]
+      Roma          Milano           Berlino
+```
+
+### 9.2 Sincronizzazione dei File tramite Home Server
+
+I nodi Secondary non comunicano direttamente con il Primary. Usano l'home server come punto di sincronizzazione:
+
+```
+Ogni N minuti (default: 15):
+1. Secondary chiede all'home server la lista degli episodi
+   con i relativi checksum SHA-256
+2. Secondary confronta con i propri file locali
+3. Secondary scarica dall'home server i file mancanti o modificati
+4. L'home server serve i file dalla propria cache se disponibili,
+   altrimenti li richiede al Primary tramite SignalR
+5. Secondary aggiorna il proprio DB con i metadati aggiornati
+```
+
+Questo ha un doppio vantaggio: i file di sync transitano per l'home server che li mette automaticamente in cache, riducendo i futuri accessi al Primary.
+
+### 9.3 Heartbeat e Rilevamento del Failover
+
+Tutti i nodi inviano un heartbeat all'home server ogni **30 secondi**. L'home server tiene traccia dello stato di ogni nodo e rileva autonomamente quando il Primary non è più raggiungibile.
+
+```
+t=0s   → heartbeat Primary atteso, nessuna risposta
+t=30s  → heartbeat Primary atteso, nessuna risposta
+t=60s  → heartbeat Primary atteso, nessuna risposta
+t=90s  → Home Server dichiara il Primary irraggiungibile → avvia elezione
+```
+
+### 9.4 Elezione del Nuovo Primary
+
+L'home server coordina l'elezione direttamente — non serve nessuna comunicazione tra i nodi Secondary. L'home server conosce già lo stato di tutti i nodi e sceglie il nuovo Primary in base a:
+
+1. **File sincronizzati** — il nodo con più file aggiornati (dati più completi)
+2. **Uptime** — in caso di parità, il nodo attivo da più tempo
+3. **NodeId** — in caso di ulteriore parità, il nodo con ID più basso (deterministico)
+
+```
+1. Home Server rileva Primary irraggiungibile
+2. Home Server calcola il punteggio di ogni Secondary
+3. Home Server notifica via SignalR il Secondary eletto:
+   "sei il nuovo Primary"
+4. Il Secondary eletto aggiorna il proprio ruolo
+5. L'home server inizia a instradare le richieste al nuovo Primary
+6. Gli altri Secondary ricevono notifica del cambio di Primary
+```
+
+> L'elezione è completamente gestita dall'home server. I nodi Secondary non devono coordinarsi tra loro — ricevono solo la notifica del risultato.
+
+### 9.5 Failback Automatico
+
+Quando il Primary originale torna online e si riconnette all'home server, il failback avviene automaticamente:
+
+```
+1. Primary originale si riconnette all'home server via SignalR
+2. Home Server rileva la riconnessione del Primary originale
+3. Home Server avvia la sincronizzazione: il Primary scarica
+   i file eventualmente aggiunti durante la sua assenza
+4. Una volta sincronizzato, l'home server notifica il Secondary attivo:
+   "cedi il controllo"
+5. Il Secondary torna al ruolo Secondary
+6. Il Primary originale riprende il controllo
+```
+
+Il failback è trasparente per gli utenti — l'home server gestisce il passaggio di consegne senza interruzioni di servizio.
+
+### 9.6 Configurazione
+
+Ogni nodo conosce solo l'URL dell'home server — non ha bisogno di conoscere gli altri nodi del cluster. Il ruolo viene assegnato e gestito dall'home server.
+
+```json
+{
+  "CreatorAgent": {
+    "HomeServer": {
+      "Url": "https://pod1.example.com",
+      "Token": "..."
+    },
+    "CreatorId": "mario-rossi",
+    "HeartbeatIntervalSeconds": 30,
+    "SyncIntervalMinutes": 15,
+    "MaxConcurrentStreams": 5
+  }
+}
+```
+
+Al primo avvio, se non esiste ancora un Primary registrato per quel `CreatorId`, l'home server assegna automaticamente il ruolo di Primary al primo nodo che si connette.
+
+### 9.7 Modello Dati del Cluster
+
+```csharp
+public class ClusterNode {
+    public Guid NodeId { get; set; }
+    public string CreatorId { get; set; }        // FK → creator
+    public NodeRole Role { get; set; }           // Primary o Secondary
+    public DateTime LastHeartbeat { get; set; }  // ultimo heartbeat ricevuto
+    public int SyncedFilesCount { get; set; }    // file sincronizzati
+    public TimeSpan Uptime { get; set; }         // uptime del nodo
+    public bool IsReachable { get; set; }        // stato corrente
+}
+
+public enum NodeRole {
+    Primary,
+    Secondary
+}
+```
+
+---
+
+## 10. Statistiche
+
+### 10.1 Cosa viene tracciato
 
 Ogni server tiene traccia degli ascolti degli episodi che serve. Per ogni riproduzione vengono registrati:
 
 - **EpisodeId** — quale episodio è stato ascoltato
 - **CreatorId** — a quale creator appartiene
 - **Date** — giorno dell'ascolto (senza ora per privacy)
-- **IsUniqueUser** — se l'utente è registrato, viene contato una sola volta per episodio per giorno; se anonimo, viene contato tramite hash anonimizzato dell'IP
+- **IsUniqueUser** — se l'utente è registrato viene contato una sola volta per episodio per giorno; se anonimo viene contato tramite hash anonimizzato dell'IP
 
 ```csharp
 public class PlayEvent {
     public Guid Id { get; set; }
-    public string EpisodeId { get; set; }        // FK → Episode
-    public string CreatorId { get; set; }         // FK → Podcast
-    public DateTime Date { get; set; }            // giorno dell'ascolto
-    public bool IsRegisteredUser { get; set; }    // utente registrato o anonimo
-    public Guid? UserId { get; set; }             // null se anonimo
+    public string EpisodeId { get; set; }
+    public string CreatorId { get; set; }
+    public DateTime Date { get; set; }
+    public bool IsRegisteredUser { get; set; }
+    public Guid? UserId { get; set; }            // null se anonimo
 }
 ```
 
-### 9.2 Aggregazione e Invio al Creator
+### 10.2 Aggregazione e Invio al Creator
 
-Le statistiche non vengono inviate in tempo reale — viaggiano nel ciclo di sync periodico dei 5 minuti. Ogni server aggrega i dati del periodo e li invia all'home server del creator tramite il canale federato:
+Le statistiche viaggiano nel ciclo di sync periodico dei 5 minuti. Ogni server aggrega i dati del periodo e li invia all'home server del creator tramite il canale federato. L'home server aggrega i totali da tutti i peer e li rende disponibili al Creator Agent.
 
-```
-1. Ogni server conta gli ascolti per episodio nel periodo
-2. Al ciclo di sync l'home server raccoglie i dati da tutti i peer
-3. L'home server aggrega i totali e li rende disponibili al Creator Agent
-4. Il Creator Agent mostra le statistiche nella dashboard
-```
-
-### 9.3 Dashboard del Creator
-
-Il creator vede nella UI del Creator Agent:
+### 10.3 Dashboard del Creator
 
 | Metrica | Dettaglio |
 |---|---|
@@ -696,48 +959,77 @@ Il creator vede nella UI del Creator Agent:
 | Utenti unici per episodio | Utenti distinti che hanno ascoltato |
 | Andamento nel tempo | Grafico giornaliero e mensile degli ascolti |
 
-Le statistiche sono aggregate a livello di episodio e di podcast. Non sono disponibili dati geografici o demografici — solo conteggi anonimi.
-
 ---
 
 ## 11. Registrazione del Creator sull'Home Server
 
-### 9.1 Flusso di Registrazione
+### 11.1 Identità Crittografica del Creator
 
-Il creator deve inserire **solo l'URL dell'home server** durante l'installazione del Creator Agent. Non è richiesta nessuna registrazione preventiva sul server, nessun account, nessun token generato manualmente.
+Ogni Creator Agent, al momento dell'installazione, genera una coppia di chiavi **Ed25519**:
 
-Il Creator Agent gestisce tutto in autonomia:
+- **Chiave privata** — rimane sul PC del creator, non lascia mai il dispositivo
+- **Chiave pubblica** — è l'identità del creator nella rete Distopia
+
+La chiave pubblica è il `CreatorId` reale nella rete — non un nome scelto dall'utente, ma un identificatore crittograficamente univoco e verificabile. Qualsiasi server che riceve contenuti firmati con quella chiave privata può verificarne l'autenticità usando la chiave pubblica, indipendentemente da chi ha "approvato" il creator.
+
+```
+CreatorId = Base58(PublicKey)   // es. "3vQB7B7hdkg4..."
+```
+
+Questo garantisce che:
+- Nessuno può impersonare un creator senza la sua chiave privata
+- I contenuti sono verificabili da qualsiasi server della rete
+- L'identità è indipendente dal server — il creator può cambiare home server senza perdere la propria identità
+- Non esiste nessuna autorità centrale che assegna identità
+
+### 11.2 Flusso di Registrazione
+
+Il creator deve inserire **solo l'URL dell'home server** durante l'installazione. Il Creator Agent gestisce tutto il resto in autonomia:
 
 ```
 1. Creator installa il Creator Agent e inserisce l'URL dell'home server
-2. Il Creator Agent genera autonomamente un token univoco (GUID + firma HMAC)
+2. Il Creator Agent genera la coppia di chiavi Ed25519 (una sola volta)
 3. Il Creator Agent contatta l'home server con POST /creators/register
-   inviando: token, CreatorId, nome, lista podcast disponibili
-4. L'home server riceve la registrazione e la mette in stato "in attesa"
-5a. Se il server è in modalità approvazione manuale →
-    l'amministratore approva dal pannello admin
-5b. Se il server è in modalità approvazione automatica →
-    il creator viene approvato immediatamente
+   inviando: chiave pubblica, nome del creator, lista podcast
+4. L'home server verifica che la chiave pubblica non sia già registrata
+5a. Modalità manuale → registrazione in stato "in attesa"
+    il creator vede "in attesa di approvazione" nella UI
+5b. Modalità automatica → registrazione confermata immediatamente
 6. Il Creator Agent riceve la conferma e apre la connessione SignalR
-7. Da questo momento il creator è operativo sulla rete
+7. Da questo momento il creator è operativo
 ```
 
-### 9.2 Modalità di Approvazione
+### 11.3 Approvazione — Policy Locale del Server
 
-Esattamente come per la federazione, ogni server può scegliere la propria politica:
+L'approvazione manuale o automatica è una **policy locale del server** — riguarda solo se quel server vuole ospitare quel creator. Non ha nulla a che fare con l'autenticità del creator nella rete, che è garantita crittograficamente dalla chiave Ed25519.
 
 ```json
 "CreatorRegistration": "manual"    // l'admin approva ogni creator manualmente
-"CreatorRegistration": "automatic" // ogni creator viene approvato in automatico
+"CreatorRegistration": "automatic" // ogni creator viene approvato automaticamente
 ```
+
+Un creator approvato su Server A non è automaticamente approvato su Server B — ogni server gestisce la propria lista di creator ospitati. Tuttavia, quando i metadati di quel creator si propagano nella federazione, tutti i server possono verificare l'autenticità dei suoi contenuti tramite la sua chiave pubblica, anche senza ospitarlo direttamente.
 
 In modalità **manuale** il creator vede nella UI del Creator Agent lo stato "in attesa di approvazione" finché l'amministratore non interviene. La connessione SignalR non viene aperta fino all'approvazione.
 
 In modalità **automatica** la registrazione viene confermata immediatamente e il creator è operativo in pochi secondi dall'installazione.
 
-### 9.3 Sicurezza
+### 11.4 Propagazione dell'Identità nella Federazione
 
-Il token generato dal Creator Agent viene usato per firmare tutte le comunicazioni successive con l'home server (vedi sezione 6.2). Se un amministratore vuole revocare l'accesso a un creator, gli basta disattivarlo dal pannello admin — il token viene invalidato e la connessione SignalR viene chiusa.
+Quando i metadati di un creator si propagano nella rete federata, viaggiano insieme alla sua chiave pubblica. Ogni server peer può quindi:
+
+- Verificare la firma dei metadati (firmati con la chiave privata del creator)
+- Verificare il checksum dei file audio (anch'esso firmato)
+- Identificare univocamente il creator tramite la sua chiave pubblica
+
+Questo significa che anche un server che non ospita direttamente quel creator può garantire ai propri utenti che i contenuti sono autentici e non alterati.
+
+### 11.5 Sicurezza
+
+- La chiave privata non lascia mai il PC del creator — non viene mai trasmessa in rete
+- Se un creator perde la chiave privata, perde la propria identità nella rete — non esiste recupero (by design, come in Bitcoin)
+- Il Creator Agent esegue un backup cifrato della chiave privata nella cartella di installazione e invita il creator a conservarne una copia in un luogo sicuro
+- Un server che revoca un creator lo rimuove dalla propria lista — ma non può invalidare la sua identità crittografica nella rete
 
 ---
 
@@ -832,9 +1124,9 @@ public class Subscription {
 
 ## 13. Considerazioni Future
 
-- **Notifiche** — push nel browser o via email quando un creator seguito pubblica un nuovo episodio (non implementato nella versione iniziale)
+- **Core AI** — introduzione di un layer di intelligenza artificiale sul Distribution Server per: ricerca semantica (l'utente cerca per intento, non per parole esatte), raccomandazioni personalizzate basate sullo storico ascolti, trascrizione automatica degli episodi per rendere il contenuto parlato cercabile, categorizzazione e tagging automatico, generazione automatica di sommari. Possibile implementazione con Claude API (Anthropic) o con modelli self-hosted tramite Ollama (Llama, Mistral) per mantenere la filosofia decentralizzata di Distopia
+- **Notifiche** — push nel browser o via email quando un creator seguito pubblica un nuovo episodio
 - **Condivisione playlist** — rendere una playlist pubblica e condivisibile tramite link
-
 - **ActivityPub / Fediverse** — compatibilità con Mastodon e sistemi federati
 - **IPFS** — distribuzione P2P dei file come alternativa ai Creator Agent
 - **Lightning Network** — micropagamenti per podcast premium
